@@ -1,0 +1,34 @@
+# Environment & secrets (root and any subfolder)
+.env
+.env.local
+server/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Runtime artifacts (regenerated on each run)
+lit_workspace/
+reports/
+chroma_data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Misc
+test.txt
+*.log
