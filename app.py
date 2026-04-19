@@ -16,13 +16,15 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from langgraph.graph import END, START, MessagesState, StateGraph
 from tooluniverse import ToolUniverse
 import chromadb
 from ddgs import DDGS
 
 load_dotenv()
+
+# ── LLM provider selection ───────────────────────────────────────────────
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "AZURE_OPENAI").upper()
 
 # ═══════════════════════════════════════════════════════════════════════
 # Page config
@@ -41,19 +43,34 @@ st.set_page_config(
 
 @st.cache_resource(show_spinner="Loading LLM, ToolUniverse & ChromaDB...")
 def setup():
-    llm = AzureChatOpenAI(
-        azure_deployment=os.getenv("AZURE_OPENAI_LLM_MODEL_DEPLOYMENT_ID"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-        temperature=0,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-    )
+    if LLM_PROVIDER == "GEMINI":
+        from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
-    embed = AzureOpenAIEmbeddings(
-        azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_MODEL_DEPLOYMENT_ID"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    )
+        llm = ChatGoogleGenerativeAI(
+            model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0,
+            max_retries=2,
+        )
+        embed = GoogleGenerativeAIEmbeddings(
+            model=os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004"),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    else:
+        from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_LLM_MODEL_DEPLOYMENT_ID"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            temperature=0,
+            max_tokens=None,
+            timeout=None,
+            max_retries=2,
+        )
+        embed = AzureOpenAIEmbeddings(
+            azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_MODEL_DEPLOYMENT_ID"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        )
 
     tu = ToolUniverse()
     tu.load_tools()
@@ -387,9 +404,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Tech Stack")
-    st.markdown("""
+    llm_label = (
+        f"**Google Gemini** (`{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}`)"
+        if LLM_PROVIDER == "GEMINI"
+        else f"**Azure OpenAI** (`{os.getenv('AZURE_OPENAI_LLM_MODEL_DEPLOYMENT_ID', 'GPT-4o')}`)"
+    )
+    st.markdown(f"""
     - **LangGraph** — Agent orchestration
-    - **Azure OpenAI GPT-4o** — Reasoning
+    - {llm_label} — Reasoning
     - **ToolUniverse** — 2,000+ biomedical APIs
     - **BM25 + files** — Literature workspace under `reports/`
     - **DuckDuckGo** — Web search
