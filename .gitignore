@@ -17,8 +17,11 @@ venv/
 
 # Runtime artifacts (regenerated on each run)
 lit_workspace/
-reports/
 chroma_data/
+
+# reports/ is tracked — it contains curated sample outputs.
+# If you want to ignore future local runs, uncomment the line below:
+# reports/
 
 # OS
 .DS_Store

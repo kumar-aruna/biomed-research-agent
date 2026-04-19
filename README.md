@@ -154,6 +154,17 @@ The web app provides an interactive interface with example queries, a live agent
 
 ---
 
+## Sample output
+
+Want to see what the agent produces before running it? Real reports are checked in under [`reports/`](reports/):
+
+- [Gene targets for Parkinson's disease (2026-04-13)](reports/Gene_Targets_Associated_With_Parkinsons_2026-04-13.md)
+- [Gene targets for Parkinson's disease (2026-04-14)](reports/Gene_Targets_Associated_With_Parkinsons_2026-04-14.md)
+
+Each file includes the query, the agent's tool-call trace, a ranked gene target table, literature findings with PMIDs, and a synthesized summary. See [`reports/README.md`](reports/README.md) for a breakdown of the report structure.
+
+---
+
 ## Limitations and future work
 
 - **BM25 is keyword-based** — it works well for gene and drug names but may miss semantically related terms. A hybrid approach (BM25 + vector embeddings) could improve recall.
