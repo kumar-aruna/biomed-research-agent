@@ -47,7 +47,14 @@ def setup():
         from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
         llm = ChatGoogleGenerativeAI(
-            model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0,
+            max_retries=2,
+        )
+        # Separate, more capable model for synthesis (1 call/query vs many for planning)
+        llm_synth = ChatGoogleGenerativeAI(
+            model=os.getenv("GEMINI_SYNTH_MODEL", "gemini-3-flash-preview"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             temperature=0,
             max_retries=2,
@@ -56,6 +63,33 @@ def setup():
             model=os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
         )
+    elif LLM_PROVIDER == "OPENROUTER":
+        from langchain_openai import ChatOpenAI
+        from langchain_community.embeddings import FakeEmbeddings
+
+        _or_base = "https://openrouter.ai/api/v1"
+        _or_key = os.getenv("OPENROUTER_API_KEY")
+        _or_headers = {
+            "HTTP-Referer": "https://github.com/bioevidence-agent",
+            "X-Title": "BioEvidence Research Agent",
+        }
+        llm = ChatOpenAI(
+            model=os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free"),
+            openai_api_key=_or_key,
+            openai_api_base=_or_base,
+            default_headers=_or_headers,
+            temperature=0,
+            max_retries=2,
+        )
+        llm_synth = ChatOpenAI(
+            model=os.getenv("OPENROUTER_SYNTH_MODEL", os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")),
+            openai_api_key=_or_key,
+            openai_api_base=_or_base,
+            default_headers=_or_headers,
+            temperature=0,
+            max_retries=2,
+        )
+        embed = FakeEmbeddings(size=1536)  # OpenRouter has no embedding endpoint; BM25 pipeline doesn't need real embeddings
     else:
         from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 
@@ -67,6 +101,7 @@ def setup():
             timeout=None,
             max_retries=2,
         )
+        llm_synth = llm  # Azure uses the same model for both roles
         embed = AzureOpenAIEmbeddings(
             azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_MODEL_DEPLOYMENT_ID"),
             api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
@@ -77,10 +112,10 @@ def setup():
 
     chroma = chromadb.Client()
 
-    return llm, embed, tu, chroma
+    return llm, llm_synth, embed, tu, chroma
 
 
-llm, embeddings, tu, chroma_client = setup()
+llm, llm_synth, embeddings, tu, chroma_client = setup()
 
 LITERATURE_WS = Path("reports/literature_workspace/streamlit_current")
 LITERATURE_WS.mkdir(parents=True, exist_ok=True)
@@ -244,7 +279,7 @@ def literature_bm25_search(chunks_path: str, search_query: str, top_k: int = 8) 
 @tool
 def literature_synthesize(research_question: str, evidence_file_path: str) -> str:
     """STEP 4 — Read evidence file from disk (path from step 3); grounded synthesis."""
-    return lit_pipe.literature_synthesize(llm, research_question, evidence_file_path)
+    return lit_pipe.literature_synthesize(llm_synth, research_question, evidence_file_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -340,7 +375,7 @@ def tool_executor(state: MessagesState):
 
 def synthesizer(state: MessagesState):
     system = SystemMessage(content=SYNTHESIZER_PROMPT)
-    response = llm.invoke([system] + state["messages"])
+    response = llm_synth.invoke([system] + state["messages"])
     return {"messages": [response]}
 
 
@@ -404,11 +439,12 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Tech Stack")
-    llm_label = (
-        f"**Google Gemini** (`{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}`)"
-        if LLM_PROVIDER == "GEMINI"
-        else f"**Azure OpenAI** (`{os.getenv('AZURE_OPENAI_LLM_MODEL_DEPLOYMENT_ID', 'GPT-4o')}`)"
-    )
+    if LLM_PROVIDER == "GEMINI":
+        llm_label = f"**Google Gemini** (`{os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite-preview')}`)"
+    elif LLM_PROVIDER == "OPENROUTER":
+        llm_label = f"**OpenRouter** (`{os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-120b:free')}`)"
+    else:
+        llm_label = f"**Azure OpenAI** (`{os.getenv('AZURE_OPENAI_LLM_MODEL_DEPLOYMENT_ID', 'GPT-4o')}`)"
     st.markdown(f"""
     - **LangGraph** — Agent orchestration
     - {llm_label} — Reasoning
@@ -482,7 +518,14 @@ if run_btn and query.strip():
     with report_container:
         st.divider()
         st.subheader("📄 Research Report")
-        final_report = response["messages"][-1].content
+        raw_content = response["messages"][-1].content
+        if isinstance(raw_content, list):
+            final_report = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw_content
+            )
+        else:
+            final_report = raw_content or ""
         st.markdown(final_report)
 
 elif run_btn:
