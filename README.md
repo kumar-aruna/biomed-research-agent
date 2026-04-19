@@ -4,6 +4,8 @@ A LangGraph-based research agent that queries real biomedical databases — Open
 
 Built for anyone exploring how LLM agents can automate biomedical literature review.
 
+**Try the hosted app:** [BioEvidence Research Agent on Streamlit Community Cloud](https://biomed-research-agent.streamlit.app/) — open the link, enter a biomedical question, and watch the agent trace plus structured report (no install required).
+
 ---
 
 ## Features
@@ -86,7 +88,9 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your Azure OpenAI credentials:
+Edit `.env` with your LLM credentials. Set `LLM_PROVIDER` to `AZURE_OPENAI`, `GEMINI`, or `OPENROUTER` and fill in the matching variables from [`.env.example`](.env.example).
+
+**Azure OpenAI** (example):
 
 | Variable | Description |
 |----------|-------------|
@@ -108,6 +112,10 @@ jupyter notebook Research_Agent.ipynb
 Walk through the cells top to bottom: environment setup → tool definitions with smoke tests → agent graph → `research()` helper → example queries.
 
 ### 4. Or run the Streamlit app
+
+**Hosted demo:** [biomed-research-agent.streamlit.app](https://biomed-research-agent.streamlit.app/)
+
+**Locally:**
 
 ```bash
 streamlit run app.py
@@ -170,7 +178,7 @@ Each file includes the query, the agent's tool-call trace, a ranked gene target 
 - **BM25 is keyword-based** — it works well for gene and drug names but may miss semantically related terms. A hybrid approach (BM25 + vector embeddings) could improve recall.
 - **PubMed Central coverage** — only open-access articles have downloadable full text. Paywalled articles fall back to abstracts, which are shorter.
 - **No persistent storage** — `lit_workspace/` is cleared on each run. For multi-session workflows, the pipeline could write to a persistent database.
-- **Single LLM provider** — currently tied to Azure OpenAI. Swapping to another provider means changing the LLM initialization in one place.
+- **LLM configuration** — the app supports Azure OpenAI, Google Gemini, and OpenRouter via `LLM_PROVIDER` in `.env`; hosted deployments must set secrets accordingly.
 - **No automated evaluation** — adding a test harness that checks whether the agent calls the expected tools for known queries would improve reliability.
 
 ---
