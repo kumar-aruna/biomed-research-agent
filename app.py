@@ -21,7 +21,7 @@ from tooluniverse import ToolUniverse
 import chromadb
 from ddgs import DDGS
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── LLM provider selection ───────────────────────────────────────────────
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "AZURE_OPENAI").upper()
@@ -47,7 +47,7 @@ def setup():
         from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
         llm = ChatGoogleGenerativeAI(
-            model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             temperature=0,
             max_retries=2,
