@@ -405,6 +405,39 @@ agent = build_agent()
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Error reporting
+# ═══════════════════════════════════════════════════════════════════════
+
+def _explain_failure(exc: Exception) -> str:
+    """Turn a provider or graph exception into a message the user can act on.
+
+    A research question costs one LLM call per planner turn, so a rate limit is
+    the failure most likely to be hit on a free-tier key.
+    """
+    name = type(exc).__name__
+    detail = str(exc)
+
+    if "RateLimit" in name or "429" in detail:
+        return (
+            f"**{LLM_PROVIDER} is rate-limiting this key.** Each research question "
+            "costs one model call per planning step, so a low quota is exhausted "
+            "quickly. Wait a minute and retry, or switch `LLM_PROVIDER` to a key "
+            "with more headroom."
+        )
+    if "Authentication" in name or "401" in detail:
+        return (
+            f"**{LLM_PROVIDER} rejected the credentials.** Check the API key and "
+            "deployment name in the app's secrets."
+        )
+    if "GraphRecursionError" in name:
+        return (
+            "**The agent exceeded its step limit.** It kept calling tools without "
+            "reaching a conclusion — try a narrower question."
+        )
+    return f"**Research failed:** {name}: {detail[:300]}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # UI
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -488,45 +521,87 @@ if run_btn and query.strip():
     trace_container = st.expander("📋 Agent Trace (click to expand)", expanded=True)
     report_container = st.container()
 
+    response = None
     with trace_container:
         status = st.status("Researching...", expanded=True)
         start = time.time()
 
         with status:
-            response = agent.invoke(
-                {"messages": [HumanMessage(query)]},
-                config={"recursion_limit": 25},
-            )
-            elapsed = time.time() - start
+            try:
+                response = agent.invoke(
+                    {"messages": [HumanMessage(query)]},
+                    config={"recursion_limit": 25},
+                )
+            except Exception as exc:
+                status.update(label="Research failed", state="error", expanded=True)
+                st.error(_explain_failure(exc))
+            else:
+                elapsed = time.time() - start
 
-            step = 1
-            for msg in response["messages"]:
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    called = [tc["name"] for tc in msg.tool_calls]
-                    st.write(f"**Step {step}:** Planner called → `{', '.join(called)}`")
-                    step += 1
-                elif isinstance(msg, ToolMessage):
-                    preview = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
-                    st.caption(f"↳ {preview}")
+                step = 1
+                for msg in response["messages"]:
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        called = [tc["name"] for tc in msg.tool_calls]
+                        st.write(f"**Step {step}:** Planner called → `{', '.join(called)}`")
+                        step += 1
+                    elif isinstance(msg, ToolMessage):
+                        preview = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
+                        st.caption(f"↳ {preview}")
 
-            status.update(
-                label=f"Research complete in {elapsed:.1f}s ({step - 1} tool calls)",
-                state="complete",
-                expanded=False,
-            )
+                status.update(
+                    label=f"Research complete in {elapsed:.1f}s ({step - 1} tool calls)",
+                    state="complete",
+                    expanded=False,
+                )
 
-    with report_container:
-        st.divider()
-        st.subheader("📄 Research Report")
-        raw_content = response["messages"][-1].content
-        if isinstance(raw_content, list):
-            final_report = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in raw_content
-            )
-        else:
-            final_report = raw_content or ""
-        st.markdown(final_report)
+    if response is not None:
+        with report_container:
+            st.divider()
+            st.subheader("📄 Research Report")
+
+            def _extract_text(msg) -> str:
+                """Pull display text out of a message, whatever shape it takes.
+
+                Different providers return content as a plain string, a list of
+                content blocks, or an empty string with the text stashed in a
+                reasoning channel. Handle all three.
+                """
+                raw = getattr(msg, "content", "")
+                if isinstance(raw, list):
+                    text = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in raw
+                    )
+                else:
+                    text = raw or ""
+                if not text.strip():
+                    extra = getattr(msg, "additional_kwargs", {}) or {}
+                    text = extra.get("reasoning_content") or extra.get("reasoning") or ""
+                return text
+
+            # The final message is usually the report, but some providers end the
+            # run with an empty message — so fall back to the most recent message
+            # that actually carries text.
+            final_report = ""
+            for msg in reversed(response["messages"]):
+                # Skip tool outputs; we only want the model's written answer.
+                if isinstance(msg, ToolMessage):
+                    continue
+                if getattr(msg, "tool_calls", None):
+                    continue
+                candidate = _extract_text(msg)
+                if candidate.strip():
+                    final_report = candidate
+                    break
+
+            if final_report.strip():
+                st.markdown(final_report)
+            else:
+                st.warning(
+                    "The agent finished but no report text was returned. Try running "
+                    "the query again, pick a different synthesis model, or switch "
+                    "`LLM_PROVIDER`."
+                )
 
 elif run_btn:
     st.warning("Please enter a research question first.")
