@@ -7,8 +7,12 @@ PubMed, UniProt) and writes structured research reports with citations.
 Run with:  streamlit run app.py
 """
 
+import json
 import os
+import re
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import literature_bm25 as lit_pipe
@@ -51,13 +55,17 @@ def setup():
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             temperature=0,
             max_retries=2,
+            max_output_tokens=8192,
         )
-        # Separate, more capable model for synthesis (1 call/query vs many for planning)
+        # Separate, more capable model for synthesis (1 call/query vs many for planning).
+        # Generous output budget so a "thinking" model has room to emit the full
+        # report instead of returning empty content after its reasoning pass.
         llm_synth = ChatGoogleGenerativeAI(
             model=os.getenv("GEMINI_SYNTH_MODEL", "gemini-3-flash-preview"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             temperature=0,
             max_retries=2,
+            max_output_tokens=8192,
         )
         embed = GoogleGenerativeAIEmbeddings(
             model=os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004"),
@@ -210,33 +218,61 @@ def pubmed_search(query: str, max_results: int = 5) -> str:
     return str(result)
 
 
+# UniProt accession pattern (e.g. P38398, Q9Y6K9). Note position 2 is always a
+# digit, which is what distinguishes an accession from a gene symbol like "BRCA1".
+_ACCESSION_RE = re.compile(
+    r"^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})$"
+)
+
+
 @tool
-def protein_info(uniprot_id: str) -> str:
+def protein_info(protein: str) -> str:
     """Get protein details from UniProt — name, gene, organism, and function.
 
+    Accepts either a gene symbol (e.g. "BRCA1") or a UniProt accession
+    (e.g. "P38398"); gene symbols are resolved to the reviewed human entry.
+
     Args:
-        uniprot_id: UniProt accession ID (e.g. "P05067")
+        protein: Gene symbol or UniProt accession
     """
-    result = tu.run_one_function({
-        "name": "UniProt_get_entry_by_accession",
-        "arguments": {"accession": uniprot_id},
-    })
-    if isinstance(result, dict):
-        summary = {
-            "protein": result.get("uniProtkbId", ""),
-            "accession": result.get("primaryAccession", ""),
-            "gene": result.get("genes", [{}])[0].get("geneName", {}).get("value", ""),
-            "organism": result.get("organism", {}).get("scientificName", ""),
-            "function": "",
-        }
-        for comment in result.get("comments", []):
-            if comment.get("commentType") == "FUNCTION":
-                texts = comment.get("texts", [])
-                if texts:
-                    summary["function"] = texts[0].get("value", "")[:500]
-                break
-        return str(summary)
-    return str(result)
+    try:
+        term = protein.strip()
+        if _ACCESSION_RE.match(term.upper()):
+            query = f"accession:{term}"
+        else:
+            query = f"gene_exact:{term} AND organism_id:9606 AND reviewed:true"
+        url = "https://rest.uniprot.org/uniprotkb/search?" + urllib.parse.urlencode(
+            {"query": query, "format": "json", "size": 1}
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "BioEvidenceAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        return f"UniProt lookup failed for '{protein}': {e}"
+
+    results = data.get("results", [])
+    if not results:
+        return f"No UniProt entry found for '{protein}'."
+
+    r = results[0]
+    function = ""
+    for comment in r.get("comments", []):
+        if comment.get("commentType") == "FUNCTION":
+            texts = comment.get("texts", [])
+            if texts:
+                function = texts[0].get("value", "")[:500]
+            break
+    summary = {
+        "protein": r.get("proteinDescription", {})
+        .get("recommendedName", {})
+        .get("fullName", {})
+        .get("value", ""),
+        "accession": r.get("primaryAccession", ""),
+        "gene": r.get("genes", [{}])[0].get("geneName", {}).get("value", ""),
+        "organism": r.get("organism", {}).get("scientificName", ""),
+        "function": function,
+    }
+    return str(summary)
 
 
 @tool
@@ -302,56 +338,69 @@ llm_with_tools = llm.bind_tools(tools_list)
 
 PLANNER_PROMPT = """\
 You are a biomedical research assistant with access to real scientific databases.
+Your job is to gather a thorough, citable evidence trail before a report is
+written. Use EVERY relevant tool — comprehensive evidence is required.
 
-Gather evidence in two tracks:
+Run this full workflow:
 
-TRACK A — Structured data
-1. disease_lookup → disease ID
-2. disease_evidence → gene targets
-3. pubmed_search → quick paper list
-4. protein_info → key proteins
-5. web_search → trials / news
+TRACK A — Structured biomedical data
+1. disease_lookup(disease_name) → resolve the topic to an EFO/MONDO disease ID
+2. disease_evidence(efo_id) → top associated gene targets with scores
+3. protein_info(protein) → function of the 1–2 most relevant genes
+   (pass the gene SYMBOL, e.g. "BRCA1" — it is resolved to UniProt automatically)
+4. pubmed_search(query) → a quick list of recent papers
 
-TRACK B — Literature (BM25 file pipeline; run in order when used)
-6. literature_collect → returns catalog_path
-7. literature_build_chunks(catalog_path=<path from 6>)
-8. literature_bm25_search(chunks_path=<path from 7>, search_query=<keywords>)
-   → saves bm25_evidence.txt; first line of the tool output is its absolute path.
-9. literature_synthesize(research_question=..., evidence_file_path=<first line from step 8>)
+TRACK B — Literature evidence (BM25 pipeline; ALWAYS run, strictly in order)
+5. literature_collect(query) → returns catalog_path
+6. literature_build_chunks(catalog_path=<path from 5>)
+7. literature_bm25_search(chunks_path=<path from 6>, search_query=<keywords>)
+   → the FIRST line of the tool output is the absolute path to bm25_evidence.txt
+8. literature_synthesize(research_question=..., evidence_file_path=<first line from 7>)
+
+9. web_search(query) → recent clinical-trial / news / therapy context
 
 Rules:
-- Finish 6→7→8→9 in order when you start TRACK B.
-- For step 9 pass the file path only (do not paste full BM25 text into the tool).
-- Stop calling tools when you have enough for a solid report.
+- Do Track A steps 1–4, then the FULL Track B pipeline 5→8 in order, then step 9.
+- For step 8 pass the file PATH only (never paste the BM25 text into the tool).
+- Do NOT write the final report yourself. Once the evidence is gathered, stop
+  calling tools — a dedicated writer will synthesize the report.
 """
 
 SYNTHESIZER_PROMPT = """\
-You are a biomedical research report writer. Based on ALL the research data \
-gathered in this conversation, write a clear, well-structured report.
+You are a biomedical research report writer for a precision-oncology audience.
+Using ONLY the evidence gathered in this conversation (OpenTargets targets,
+UniProt protein data, PubMed/PMC literature, the literature_synthesize output,
+and web results), write a rigorous, well-structured markdown report.
 
-Format:
+Begin your response with "## Disease Overview" and use EXACTLY these sections:
 
 ## Disease Overview
-Brief description of the disease or topic.
+2–3 sentences on the disease/topic, grounded in the retrieved disease description.
 
 ## Top Gene Targets
-| Gene Symbol | Ensembl ID | Association Score |
-|-------------|-----------|-------------------|
-(Fill from the evidence data. Include up to 10 genes.)
+A markdown table with columns: | Gene | Ensembl ID | Association Score |
+Fill it from the disease_evidence data — up to 10 genes, highest score first.
+
+## Protein Function
+For the key gene(s), summarize the UniProt entry (protein name, accession,
+function). If no protein data was retrieved, say so.
 
 ## Key Literature Findings
-Summarize publications and any **literature_synthesize** output. Use [PMID:…] where available.
+Summarize the literature and the literature_synthesize output. Cite specific
+papers as [PMID:xxxxxxxx] wherever a PMID is available.
 
-## Additional Insights
-Any notable findings from web search or cross-referencing.
+## Clinical & Translational Relevance
+Therapeutic implications, biomarkers, or trials drawn from web_search / literature
+(e.g. targeted therapies, companion diagnostics).
 
 ## Summary
-A concise 2-3 sentence conclusion answering the user's original question.
+A concise 2–3 sentence answer to the user's original question.
 
 Rules:
-- ONLY include information that was actually retrieved — never make up data
-- If a section has no data, say "No data retrieved for this section"
-- Be precise with gene names, scores, and citations
+- Ground EVERY claim in retrieved data — never invent genes, scores, PMIDs, or facts.
+- Always render the gene-target table when disease_evidence returned data.
+- If a section genuinely has no data, write "No data retrieved for this section."
+- Be precise with gene symbols, association scores, and citations.
 """
 
 
@@ -541,9 +590,16 @@ if run_btn and query.strip():
                 step = 1
                 for msg in response["messages"]:
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        called = [tc["name"] for tc in msg.tool_calls]
-                        st.write(f"**Step {step}:** Planner called → `{', '.join(called)}`")
-                        step += 1
+                        for tc in msg.tool_calls:
+                            arg_preview = ", ".join(
+                                f"{k}={v}" for k, v in (tc.get("args") or {}).items()
+                            )
+                            if len(arg_preview) > 70:
+                                arg_preview = arg_preview[:70] + "…"
+                            st.write(
+                                f"**Step {step}:** 🔧 `{tc['name']}({arg_preview})`"
+                            )
+                            step += 1
                     elif isinstance(msg, ToolMessage):
                         preview = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
                         st.caption(f"↳ {preview}")
